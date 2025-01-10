@@ -1675,9 +1675,17 @@ func (l *List) Uids(opt ListOptions) (*pb.List, error) {
 	l.RLock()
 	defer l.RUnlock()
 
-	// Pre-assign length to make it faster.
-	res := make([]uint64, 0, l.mutationMap.len()+codec.ApproxLen(l.plist.Pack))
 	out := &pb.List{}
+	if l.mutationMap.len() == 0 && opt.Intersect != nil && len(l.plist.Splits) == 0 {
+		if opt.ReadTs < l.minTs {
+			return out, errors.Wrapf(ErrTsTooOld, "While reading UIDs")
+		}
+		algo.IntersectCompressedWith(l.plist.Pack, opt.AfterUid, opt.Intersect, out)
+		return out, nil
+	}
+
+	// Pre-assign length to make it faster.
+	res := make([]uint64, 0, x.MinInt(opt.First, len(opt.Intersect.Uids), l.mutationMap.len()+codec.ApproxLen(l.plist.Pack)))
 
 	checkLimit := func() bool {
 		// We need the last N.
@@ -1687,26 +1695,15 @@ func (l *List) Uids(opt ListOptions) (*pb.List, error) {
 				res = res[1:]
 			}
 		} else if len(res) > opt.First {
-			return true // Stop iteration
+			return true
 		}
 		return false
 	}
 
-	if l.mutationMap.len() == 0 && opt.Intersect != nil && len(l.plist.Splits) == 0 {
-		if opt.ReadTs < l.minTs {
-			l.RUnlock()
-			return out, errors.Wrapf(ErrTsTooOld, "While reading UIDs")
-		}
-		algo.IntersectCompressedWith(l.plist.Pack, opt.AfterUid, opt.Intersect, out)
-		l.RUnlock()
-		return out, nil
-	}
-
-	if opt.Intersect != nil && len(opt.Intersect.Uids) < l.ApproxLen() {
+	if opt.Intersect != nil && len(opt.Intersect.Uids) < l.mutationMap.len()+codec.ApproxLen(l.plist.Pack) {
 		for _, uid := range opt.Intersect.Uids {
 			found, _, err := l.findPosting(opt.ReadTs, uid)
 			if err != nil {
-				l.RUnlock()
 				return nil, errors.Wrapf(err, "While find posting for UIDs")
 			}
 			if found {
@@ -1716,7 +1713,6 @@ func (l *List) Uids(opt ListOptions) (*pb.List, error) {
 				}
 			}
 		}
-		l.RUnlock()
 		out.Uids = res
 		return out, nil
 	}
