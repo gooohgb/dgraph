@@ -1672,11 +1672,26 @@ func (l *List) Uids(opt ListOptions) (*pb.List, error) {
 	if opt.First == 0 {
 		opt.First = math.MaxInt32
 	}
-	// Pre-assign length to make it faster.
 	l.RLock()
-	// Use approximate length for initial capacity.
+	defer l.RUnlock()
+
+	// Pre-assign length to make it faster.
 	res := make([]uint64, 0, l.mutationMap.len()+codec.ApproxLen(l.plist.Pack))
 	out := &pb.List{}
+
+	checkLimit := func() bool {
+		// We need the last N.
+		// TODO: This could be optimized by only considering some of the last UidBlocks.
+		if opt.First < 0 {
+			if len(res) > -opt.First {
+				res = res[1:]
+			}
+		} else if len(res) > opt.First {
+			return true // Stop iteration
+		}
+		return false
+	}
+
 	if l.mutationMap.len() == 0 && opt.Intersect != nil && len(l.plist.Splits) == 0 {
 		if opt.ReadTs < l.minTs {
 			l.RUnlock()
@@ -1687,35 +1702,34 @@ func (l *List) Uids(opt ListOptions) (*pb.List, error) {
 		return out, nil
 	}
 
-	var uidMin, uidMax uint64 = 0, 0
-	if opt.Intersect != nil && len(opt.Intersect.Uids) > 0 {
-		uidMin = opt.Intersect.Uids[0]
-		uidMax = opt.Intersect.Uids[len(opt.Intersect.Uids)-1]
+	if opt.Intersect != nil && len(opt.Intersect.Uids) < l.ApproxLen() {
+		for _, uid := range opt.Intersect.Uids {
+			found, _, err := l.findPosting(opt.ReadTs, uid)
+			if err != nil {
+				l.RUnlock()
+				return nil, errors.Wrapf(err, "While find posting for UIDs")
+			}
+			if found {
+				res = append(res, uid)
+				if checkLimit() {
+					break
+				}
+			}
+		}
+		l.RUnlock()
+		out.Uids = res
+		return out, nil
 	}
 
 	err := l.iterate(opt.ReadTs, opt.AfterUid, func(p *pb.Posting) error {
 		if p.PostingType == pb.Posting_REF {
-			if p.Uid < uidMin {
-				return nil
-			}
-			if p.Uid > uidMax && uidMax > 0 {
-				return ErrStopIteration
-			}
 			res = append(res, p.Uid)
-
-			if opt.First < 0 {
-				// We need the last N.
-				// TODO: This could be optimized by only considering some of the last UidBlocks.
-				if len(res) > -opt.First {
-					res = res[1:]
-				}
-			} else if len(res) > opt.First {
+			if checkLimit() {
 				return ErrStopIteration
 			}
 		}
 		return nil
 	})
-	l.RUnlock()
 	if err != nil {
 		return out, errors.Wrapf(err, "cannot retrieve UIDs from list with key %s",
 			hex.EncodeToString(l.key))
@@ -1729,9 +1743,8 @@ func (l *List) Uids(opt ListOptions) (*pb.List, error) {
 	}
 	lenAfter := len(out.Uids)
 	if lenBefore-lenAfter > 0 {
-		// If we see this log, that means that iterate is going over too many elements that it doesn't need to
-		glog.V(3).Infof("Retrieved a list. length before intersection: %d, length after: %d, extra"+
-			" elements: %d", lenBefore, lenAfter, lenBefore-lenAfter)
+		glog.V(3).Infof("Retrieved a list. length before intersection: %d, length after: %d, extra elements: %d",
+			lenBefore, lenAfter, lenBefore-lenAfter)
 	}
 	return out, nil
 }
