@@ -1745,7 +1745,7 @@ func (l *List) Uids(opt ListOptions) (*pb.List, error) {
 	if lenBefore-lenAfter > 0 {
 		// If we see this log, that means that iterate is going over too many elements that it doesn't need to
 		glog.V(3).Infof("Retrieved a list. length before intersection: %d, length after: %d, extra"+
-			"elements: %d", lenBefore, lenAfter, lenBefore-lenAfter)
+			" elements: %d", lenBefore, lenAfter, lenBefore-lenAfter)
 	}
 	return out, nil
 }
