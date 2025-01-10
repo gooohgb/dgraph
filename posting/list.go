@@ -1673,14 +1673,15 @@ func (l *List) Uids(opt ListOptions) (*pb.List, error) {
 		opt.First = math.MaxInt32
 	}
 	l.RLock()
-	defer l.RUnlock()
 
 	out := &pb.List{}
 	if l.mutationMap.len() == 0 && opt.Intersect != nil && len(l.plist.Splits) == 0 {
 		if opt.ReadTs < l.minTs {
+			l.RUnlock()
 			return out, errors.Wrapf(ErrTsTooOld, "While reading UIDs")
 		}
 		algo.IntersectCompressedWith(l.plist.Pack, opt.AfterUid, opt.Intersect, out)
+		l.RUnlock()
 		return out, nil
 	}
 
@@ -1704,7 +1705,8 @@ func (l *List) Uids(opt ListOptions) (*pb.List, error) {
 		for _, uid := range opt.Intersect.Uids {
 			found, _, err := l.findPosting(opt.ReadTs, uid)
 			if err != nil {
-				return nil, errors.Wrapf(err, "While find posting for UIDs")
+				l.RUnlock()
+				return out, errors.Wrapf(err, "While find posting for UIDs")
 			}
 			if found {
 				res = append(res, uid)
@@ -1714,6 +1716,7 @@ func (l *List) Uids(opt ListOptions) (*pb.List, error) {
 			}
 		}
 		out.Uids = res
+		l.RUnlock()
 		return out, nil
 	}
 
@@ -1726,6 +1729,7 @@ func (l *List) Uids(opt ListOptions) (*pb.List, error) {
 		}
 		return nil
 	})
+	l.RUnlock()
 	if err != nil {
 		return out, errors.Wrapf(err, "cannot retrieve UIDs from list with key %s",
 			hex.EncodeToString(l.key))
