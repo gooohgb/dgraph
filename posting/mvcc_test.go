@@ -388,14 +388,59 @@ func TestReadUidsWarmsCachedPostingListConcurrently(t *testing.T) {
 	for i := 0; i < readers; i++ {
 		result := <-results
 		require.NoError(t, result.err)
-		require.True(t, result.list.canUseCalculatedUids(1))
-		require.Len(t, result.list.mutationMap.calculatedUids, uidCount)
+		uids, err := result.list.Uids(ListOptions{ReadTs: 1})
+		require.NoError(t, err)
+		require.Len(t, uids.Uids, uidCount)
 	}
 
 	MemLayerInstance.wait()
 	cacheItem, ok := MemLayerInstance.cache.get(key)
 	require.True(t, ok)
 	require.True(t, cacheItem.list.canUseCalculatedUids(1))
+}
+
+func TestReadUidsDoesNotWaitForConcurrentCacheWarm(t *testing.T) {
+	require.NoError(t, pstore.DropAll())
+
+	origMemLayer := MemLayerInstance
+	MemLayerInstance = initMemoryLayer(10<<20, false)
+	t.Cleanup(func() {
+		MemLayerInstance = origMemLayer
+	})
+
+	key := x.DataKey(x.AttrInRootNamespace("readUidsNonBlockingCacheHit"), 1)
+	MemLayerInstance.saveInCache(key, &List{
+		key:         key,
+		plist:       &pb.PostingList{},
+		mutationMap: newMutableLayer(),
+		minTs:       1,
+		maxTs:       1,
+	})
+	MemLayerInstance.wait()
+
+	cacheItem, ok := MemLayerInstance.cache.get(key)
+	require.True(t, ok)
+	require.True(t, cacheItem.list.uidWarmState.CompareAndSwap(0, 1))
+	t.Cleanup(func() {
+		cacheItem.list.uidWarmState.Store(0)
+	})
+
+	list, err := getNew(key, pstore, 1, true)
+	require.NoError(t, err)
+	require.False(t, list.canUseCalculatedUids(1),
+		"a concurrent UID reader should serve an unwarmed copy instead of waiting")
+	uids, err := list.Uids(ListOptions{ReadTs: 1})
+	require.NoError(t, err)
+	require.Empty(t, uids.Uids)
+}
+
+func TestPublishCalculatedUidsRejectsStaleCopy(t *testing.T) {
+	list := &List{mutationMap: newMutableLayer()}
+	list.mutationMap.committedUidsTime = 1
+
+	require.False(t, list.publishCalculatedUids(2, []uint64{1, 2}))
+	require.False(t, list.mutationMap.isUidsCalculated)
+	require.Empty(t, list.mutationMap.calculatedUids)
 }
 
 func TestPostingListRead(t *testing.T) {

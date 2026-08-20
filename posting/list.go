@@ -13,6 +13,7 @@ import (
 	"log"
 	"math"
 	"sort"
+	"sync/atomic"
 
 	"github.com/dgryski/go-farm"
 	"github.com/golang/glog"
@@ -70,6 +71,7 @@ type List struct {
 	mutationMap *MutableLayer
 	minTs       uint64 // commit timestamp of immutable layer, reject reads before this ts.
 	maxTs       uint64 // max commit timestamp seen for this list.
+	uidWarmState atomic.Int32
 
 	cache []byte
 }
@@ -1771,6 +1773,23 @@ func (l *List) calculateUids() (bool, error) {
 	l.mutationMap.calculatedUids = res
 	l.mutationMap.isUidsCalculated = true
 	return true, nil
+}
+
+// publishCalculatedUids installs UIDs calculated from a private copy if the cached list has not
+// changed since that copy was made.
+func (l *List) publishCalculatedUids(committedUidsTime uint64, uids []uint64) bool {
+	l.Lock()
+	defer l.Unlock()
+
+	if l.mutationMap == nil || l.mutationMap.currentEntries != nil ||
+		l.mutationMap.isUidsCalculated ||
+		l.mutationMap.committedUidsTime != committedUidsTime {
+		return false
+	}
+
+	l.mutationMap.calculatedUids = uids
+	l.mutationMap.isUidsCalculated = true
+	return true
 }
 
 // canUseCalculatedUids reports whether calculatedUids can serve a read at readTs. The slice is

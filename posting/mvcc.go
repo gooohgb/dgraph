@@ -768,26 +768,38 @@ func (c *CachePL) Set(l *List, readTs uint64) {
 func (ml *MemoryLayer) readFromCache(key []byte, readTs uint64, readUids bool) (*List, error) {
 	cacheItem, ok := ml.cache.get(key)
 
+	if !ok || cacheItem.list == nil {
+		return nil, nil
+	}
+
+	cachedList := cacheItem.list
+	cachedList.RLock()
 	// Issue #9597 fix: Cache is only valid if minTs <= readTs AND maxTs >= readTs.
 	// If maxTs < readTs, the cache is missing mutations committed after maxTs.
-	if ok && cacheItem.list != nil && cacheItem.list.minTs <= readTs && cacheItem.list.maxTs >= readTs {
-		if readUids {
-			calculated, err := cacheItem.list.calculateUids()
-			if err != nil {
-				return nil, err
-			}
-			if calculated {
-				// Re-set the entry so ristretto accounts for the calculated UID slice.
-				ml.cache.set(key, cacheItem)
-			}
-		}
-		cacheItem.list.RLock()
-		lCopy := copyList(cacheItem.list)
-		cacheItem.list.RUnlock()
-		checkForRollup(key, lCopy)
-		return lCopy, nil
+	if cachedList.minTs > readTs || cachedList.maxTs < readTs {
+		cachedList.RUnlock()
+		return nil, nil
 	}
-	return nil, nil
+	lCopy := copyList(cachedList)
+	cachedList.RUnlock()
+
+	needsWarm := readUids && lCopy.mutationMap != nil &&
+		!lCopy.mutationMap.isUidsCalculated && lCopy.mutationMap.currentEntries == nil
+	if needsWarm && cachedList.uidWarmState.CompareAndSwap(0, 1) {
+		defer cachedList.uidWarmState.Store(0)
+
+		calculated, err := lCopy.calculateUids()
+		if err != nil {
+			return nil, err
+		}
+		if calculated && cachedList.publishCalculatedUids(
+			lCopy.mutationMap.committedUidsTime, lCopy.mutationMap.calculatedUids) {
+			// Re-set the entry so ristretto accounts for the calculated UID slice.
+			ml.cache.set(key, cacheItem)
+		}
+	}
+	checkForRollup(key, lCopy)
+	return lCopy, nil
 }
 
 func (ml *MemoryLayer) readFromDisk(key []byte, pstore *badger.DB, readTs uint64, readUids bool) (*List, error) {
